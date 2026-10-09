@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -13,6 +14,7 @@ from app.api.products import router as products_router
 from app.api.orders import router as orders_router
 from app.core.config import Settings
 from app.db.session import create_engine
+from app.search.factory import create_search_provider
 
 
 @asynccontextmanager
@@ -26,7 +28,15 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.session_factory = async_sessionmaker(
             engine, expire_on_commit=False
         )
-        yield
+        key = settings.meilisearch_master_key.get_secret_value()
+        async with httpx.AsyncClient(
+            base_url=str(settings.meilisearch_url),
+            headers={"Authorization": f"Bearer {key}"} if key else {},
+            timeout=settings.search_http_timeout,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        ) as search_client:
+            application.state.search_provider = create_search_provider(settings, search_client)
+            yield
     finally:
         await engine.dispose()
 

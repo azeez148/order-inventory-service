@@ -3,3 +3,4 @@ pydantic==2.14.0
 uvicorn==0.54.0
 SQLAlchemy[asyncio]==2.0.54
 asyncpg==0.32.0
+httpx==0.28.1

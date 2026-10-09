@@ -5,8 +5,9 @@ The current implementation includes the FastAPI scaffold and a Docker developmen
 environment with PostgreSQL and Meilisearch, plus the initial database schema.
 The app connects through a bounded asynchronous SQLAlchemy pool and supports
 product creation, retrieval, metadata updates, and atomic stock adjustments.
-Transactional order creation and retrieval are implemented. Search and reporting
-functionality will follow incrementally.
+Transactional order creation and retrieval and the search-provider adapter are
+implemented. The public search API, outbox consumer, and reporting will follow
+incrementally.
 
 ## Run with Docker Compose
 
@@ -36,7 +37,7 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -
 Containers have health checks, and the app starts after PostgreSQL and Meilisearch
 are healthy. The app checks PostgreSQL connectivity at startup and then serves
 health/docs, product/inventory endpoints, and transactional order endpoints.
-Search calls are not implemented yet.
+The search adapter is available internally; there is no public search route yet.
 PostgreSQL creates the four application
 tables from `schema.sql` when its data volume is initialized for the first time.
 
@@ -238,6 +239,53 @@ still future steps. Only script-owned fixture data is removed.
 Repeated requests create separate orders; idempotency, cancellation, and stock
 restoration workflows are not implemented. A lost response after commit therefore
 requires careful client handling rather than automatic retry.
+
+## Search provider architecture
+
+`SearchProvider` defines product text search, indexing, and removal. Its
+`SearchProduct` projection contains only ID, name, and description. The implemented
+`MeilisearchProvider` uses one lifespan-managed `httpx.AsyncClient` with bounded
+HTTP connections. No blocking SDK or SQL wildcard text search is used.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SEARCH_PROVIDER` | `meilisearch` | Only implemented provider; other values fail validation |
+| `MEILISEARCH_URL` | `http://meilisearch:7700` | Internal search service URL |
+| `MEILISEARCH_MASTER_KEY` | Empty | Bearer key; Compose supplies the local development key |
+| `MEILISEARCH_INDEX` | `products` | Index UID with letters, digits, underscores, or hyphens |
+| `SEARCH_HTTP_TIMEOUT` | `5` seconds | HTTP network timeout |
+| `SEARCH_TASK_TIMEOUT` | `30` seconds | Maximum polling time for each indexing task |
+
+On first use, the adapter creates or checks the index's `id` primary key and sets
+searchable attributes to name then description. Setup is guarded within each
+process and retried after failure. If an initialized index is lost, a 404 resets
+setup so a subsequent call can recreate it. Searches return only ranked IDs;
+the next API step will hydrate current prices and stock from PostgreSQL.
+
+Indexing/removal waits for the asynchronous task to reach `succeeded`. Failed,
+canceled, malformed, or timed-out operations raise `SearchProviderError` with a
+sanitized message. A timeout does not cancel server-side work: idempotent upserts
+allow the later outbox consumer to retry uncertain completion safely. The client
+is closed on lifespan exit. Search connection/index setup is lazy, so application
+lifespan itself does not require a search network call; Compose still waits for
+service health during stack startup.
+
+Meilisearch fits the assessment's external indexing requirement with a small
+Docker service, ranking, and typo tolerance. Elasticsearch/OpenSearch add more
+operations than needed here. PostgreSQL full-text search is a valid alternative,
+but wildcard `ILIKE` would put primary text-search work on the transactional
+database. The contract allows future provider replacement while acknowledging
+that adapters and their behavior need their own implementation and tests.
+
+```bash
+docker compose exec -T app python < scripts/check_search_provider.py
+```
+
+The script checks failure handling with HTTPX's mock transport, validates behavior
+against a separate randomly named live index, and removes only that index.
+Product outbox events are still pending; no consumer runs and no public search
+endpoint exists at this step. See [Meilisearch's task lifecycle reference](https://www.meilisearch.com/docs/reference/api/async-task-management/get-task)
+for why queued writes need completion checks.
 
 ## Run locally
 
