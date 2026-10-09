@@ -3,7 +3,7 @@
 import os
 from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
@@ -15,6 +15,9 @@ class Settings(BaseModel):
     db_pool_size: int = Field(default=5, gt=0)
     db_max_overflow: int = Field(default=5, ge=0)
     db_pool_timeout: float = Field(default=10, gt=0, allow_inf_nan=False)
+    reporting_pool_size: int = Field(default=2, gt=0)
+    reporting_pool_timeout: float = Field(default=5, gt=0, allow_inf_nan=False)
+    reporting_statement_timeout_ms: int = Field(default=10000, gt=0, le=2147483647)
     search_provider: Literal["meilisearch"] = "meilisearch"
     meilisearch_url: AnyHttpUrl = AnyHttpUrl("http://meilisearch:7700")
     meilisearch_master_key: SecretStr = SecretStr("")
@@ -37,6 +40,12 @@ class Settings(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def validate_reporting_capacity(self) -> "Settings":
+        if self.reporting_pool_size >= self.db_pool_size + self.db_max_overflow:
+            raise ValueError("Reporting pool must be smaller than total OLTP connection capacity")
+        return self
+
     @classmethod
     def from_environment(cls) -> "Settings":
         return cls.model_validate(
@@ -45,6 +54,9 @@ class Settings(BaseModel):
                 "db_pool_size": os.environ.get("DB_POOL_SIZE", "5"),
                 "db_max_overflow": os.environ.get("DB_MAX_OVERFLOW", "5"),
                 "db_pool_timeout": os.environ.get("DB_POOL_TIMEOUT", "10"),
+                "reporting_pool_size": os.environ.get("REPORTING_POOL_SIZE", "2"),
+                "reporting_pool_timeout": os.environ.get("REPORTING_POOL_TIMEOUT", "5"),
+                "reporting_statement_timeout_ms": os.environ.get("REPORTING_STATEMENT_TIMEOUT_MS", "10000"),
                 "search_provider": os.environ.get("SEARCH_PROVIDER", "meilisearch"),
                 "meilisearch_url": os.environ.get("MEILISEARCH_URL", "http://meilisearch:7700"),
                 "meilisearch_master_key": os.environ.get("MEILISEARCH_MASTER_KEY", ""),

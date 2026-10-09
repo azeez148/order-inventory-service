@@ -6,8 +6,8 @@ environment with PostgreSQL and Meilisearch, plus the initial database schema.
 The app connects through a bounded asynchronous SQLAlchemy pool and supports
 product creation, retrieval, metadata updates, and atomic stock adjustments.
 Transactional orders and product search with authoritative database hydration
-and automatic outbox synchronization are implemented. Reporting will follow
-incrementally.
+and automatic outbox synchronization are implemented. Reporting has separate
+connection capacity; its aggregate API will follow incrementally.
 
 ## Run with Docker Compose
 
@@ -117,9 +117,8 @@ The active outbox consumer uses one connection from this OLTP pool while awaitin
 indexing. It locks its event, not product rows; warehouse/order writes can continue.
 This is an accepted baseline trade-off to evaluate in the mixed workload tests.
 
-Pools are per process: four workers at these settings could open up to 40 OLTP
-connections, before future reporting capacity or other clients. Reporting will
-receive a separate smaller pool later. PgBouncer can provide centralized
+Pools are per process: each worker can open up to ten OLTP plus two reporting
+connections, so four workers can allow 48 total before other clients. PgBouncer can provide centralized
 PostgreSQL connection management when worker/replica counts justify it.
 
 Ordinary SQLAlchemy persistence can remain reasonably portable. Concurrency SQL
@@ -144,6 +143,43 @@ running app's configured pool.
 See [SQLAlchemy's async lifecycle documentation](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 and [pooling documentation](https://docs.sqlalchemy.org/en/20/core/pooling.html)
 for the underlying connection behavior.
+
+## Reporting connection isolation
+
+Reporting uses its own async engine and session factory, with a smaller pool on
+the same PostgreSQL instance. Future report routes must use
+`get_reporting_session`; product, order, search hydration, and the outbox continue
+using the OLTP pool. Reporting startup connectivity is checked, and both engines
+are disposed on shutdown or startup failure.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `REPORTING_POOL_SIZE` | `2` | Maximum report connections, with overflow fixed at zero |
+| `REPORTING_POOL_TIMEOUT` | `5` seconds | Wait limit for reporting connection acquisition |
+| `REPORTING_STATEMENT_TIMEOUT_MS` | `10000` | PostgreSQL timeout for each reporting statement |
+
+Settings reject nonpositive limits and require reporting capacity to be smaller
+than total OLTP capacity. Two reporting connections constrain heavy aggregates
+without taking away the ten-connection OLTP budget. The ten-second statement
+limit is a local starting point to test against seeded data, not a performance
+claim. It applies to each statement, not the complete request.
+
+asyncpg supplies `statement_timeout` and `default_transaction_read_only=on` when
+opening reporting connections. These settings stay on that pool's connections
+and do not leak into OLTP. Read-only defaults prevent accidental writes in report
+code; production could also use a dedicated database role with read-only grants.
+Separate pools isolate connection capacity, while PostgreSQL CPU, memory, and
+I/O remain shared. Read replicas or materialized views are future options.
+Transaction-pooling PgBouncer would require separate validation of these settings.
+
+```bash
+docker compose exec -T app python -m scripts.check_reporting_pool
+```
+
+The check saturates reporting capacity while verifying OLTP connectivity,
+rejects accidental writes, cancels a real aggregate using a short test timeout,
+and verifies connection reuse/settings/lifecycle cleanup. No report API exists
+yet; Step 14 will add the sales summary and its HTTP timeout behavior.
 
 ## Product and inventory APIs
 

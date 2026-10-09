@@ -41,7 +41,7 @@ def check_settings() -> None:
         else:
             raise AssertionError(f"Accepted invalid settings: {tuple(override)}")
     assert "test-secret" not in repr(Settings.model_validate(base))
-    with patch.dict(os.environ, {"DB_POOL_SIZE": "2", "DB_MAX_OVERFLOW": "0", "DB_POOL_TIMEOUT": "0.5"}):
+    with patch.dict(os.environ, {"DB_POOL_SIZE": "2", "DB_MAX_OVERFLOW": "0", "DB_POOL_TIMEOUT": "0.5", "REPORTING_POOL_SIZE": "1"}):
         settings = Settings.from_environment()
         assert settings.db_pool_size == 2
         assert settings.db_max_overflow == 0

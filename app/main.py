@@ -14,7 +14,7 @@ from app.api.errors import register_exception_handlers
 from app.api.products import router as products_router
 from app.api.orders import router as orders_router
 from app.core.config import Settings
-from app.db.session import create_engine
+from app.db.session import create_engine, create_reporting_engine
 from app.search.factory import create_search_provider
 from app.search.outbox import SearchOutboxWorker
 
@@ -23,12 +23,20 @@ from app.search.outbox import SearchOutboxWorker
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     settings = Settings.from_environment()
     engine = create_engine(settings)
+    reporting_engine = None
     try:
+        reporting_engine = create_reporting_engine(settings)
         async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        async with reporting_engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
         application.state.db_engine = engine
         application.state.session_factory = async_sessionmaker(
             engine, expire_on_commit=False
+        )
+        application.state.reporting_engine = reporting_engine
+        application.state.reporting_session_factory = async_sessionmaker(
+            reporting_engine, expire_on_commit=False
         )
         key = settings.meilisearch_master_key.get_secret_value()
         async with httpx.AsyncClient(
@@ -54,7 +62,11 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     with suppress(asyncio.CancelledError):
                         await task
     finally:
-        await engine.dispose()
+        try:
+            if reporting_engine is not None:
+                await reporting_engine.dispose()
+        finally:
+            await engine.dispose()
 
 
 app = FastAPI(
