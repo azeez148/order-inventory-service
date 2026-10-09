@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import TimeoutError as PoolTimeout
+from app.search.provider import SearchProviderError
 
 from app.core.errors import (
     InsufficientStock, OrderNotFound, OrderTotalExceeded,
@@ -30,6 +31,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(OrderTotalExceeded)
     async def total_exceeded(request: Request, error: OrderTotalExceeded) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": str(error)})
+
+    @app.exception_handler(SearchProviderError)
+    async def search_unavailable(request: Request, error: SearchProviderError) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": "Search is temporarily unavailable"})
 
     @app.exception_handler(PoolTimeout)
     async def pool_timeout(request: Request, error: PoolTimeout) -> JSONResponse:

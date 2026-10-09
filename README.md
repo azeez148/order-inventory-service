@@ -5,9 +5,8 @@ The current implementation includes the FastAPI scaffold and a Docker developmen
 environment with PostgreSQL and Meilisearch, plus the initial database schema.
 The app connects through a bounded asynchronous SQLAlchemy pool and supports
 product creation, retrieval, metadata updates, and atomic stock adjustments.
-Transactional order creation and retrieval and the search-provider adapter are
-implemented. The public search API, outbox consumer, and reporting will follow
-incrementally.
+Transactional orders and product search with authoritative database hydration
+are implemented. The outbox consumer and reporting will follow incrementally.
 
 ## Run with Docker Compose
 
@@ -37,7 +36,8 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -
 Containers have health checks, and the app starts after PostgreSQL and Meilisearch
 are healthy. The app checks PostgreSQL connectivity at startup and then serves
 health/docs, product/inventory endpoints, and transactional order endpoints.
-The search adapter is available internally; there is no public search route yet.
+The product search route uses Meilisearch for matching and PostgreSQL for current
+product values. Outbox events are not automatically processed yet.
 PostgreSQL creates the four application
 tables from `schema.sql` when its data volume is initialized for the first time.
 
@@ -170,7 +170,7 @@ timestamp and do not generate extra events.
 Creation and actual name/description changes append an `upsert` outbox event in
 the same transaction as the product write. A failed event insert rolls back the
 product change. Price-only and stock-only changes need no text-search event:
-search will eventually return matching IDs and hydrate current values from
+search returns matching IDs and hydrates current values from
 PostgreSQL. The consumer is not implemented yet, so events remain pending and
 products are not automatically searchable in Meilisearch at this step.
 
@@ -260,7 +260,7 @@ On first use, the adapter creates or checks the index's `id` primary key and set
 searchable attributes to name then description. Setup is guarded within each
 process and retried after failure. If an initialized index is lost, a 404 resets
 setup so a subsequent call can recreate it. Searches return only ranked IDs;
-the next API step will hydrate current prices and stock from PostgreSQL.
+the API hydrates current prices and stock from PostgreSQL.
 
 Indexing/removal waits for the asynchronous task to reach `succeeded`. Failed,
 canceled, malformed, or timed-out operations raise `SearchProviderError` with a
@@ -283,9 +283,40 @@ docker compose exec -T app python < scripts/check_search_provider.py
 
 The script checks failure handling with HTTPX's mock transport, validates behavior
 against a separate randomly named live index, and removes only that index.
-Product outbox events are still pending; no consumer runs and no public search
-endpoint exists at this step. See [Meilisearch's task lifecycle reference](https://www.meilisearch.com/docs/reference/api/async-task-management/get-task)
+Product outbox events are still pending; no consumer runs yet.
+See [Meilisearch's task lifecycle reference](https://www.meilisearch.com/docs/reference/api/async-task-management/get-task)
 for why queued writes need completion checks.
+
+## Product search API
+
+`GET /api/v1/products/search?q=football&limit=20` returns a JSON array of current
+product records in search relevance order. `q` is required, trimmed, and must
+contain 1–200 characters. `limit` defaults to 20 and allows 1–100. Invalid query
+parameters return 422; no matches return 200 with `[]`.
+
+The service asks `SearchProvider` for ranked IDs, fetches matching PostgreSQL
+products with one batched query, and restores their relevance order. It skips
+database access for empty matches. Stale index IDs whose products are absent
+are omitted, so results can contain fewer records than the requested limit.
+Returned name, description, price, stock, and timestamps are all current database
+values as of the read; search results do not reserve inventory.
+
+An outdated text projection can still match old wording until synchronization
+finishes, but its response never trusts indexed transactional values. Search
+failures return a generic 503 rather than silently switching to SQL text matching.
+The search network call completes before hydration checks out a database
+connection.
+
+```bash
+docker compose exec -T app python < scripts/check_search_api.py
+```
+
+This script creates fixture products via HTTP, explicitly indexes them through
+the provider, exercises the real API, and removes only its own data/documents.
+Checks cover ranking, one-query hydration, stale product/text projections,
+current prices/stock, validation, and sanitized provider failure handling.
+Until Step 11's consumer is added, creating a product alone records indexing
+intent but does not make that product automatically searchable.
 
 ## Run locally
 

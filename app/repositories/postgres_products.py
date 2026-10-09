@@ -34,6 +34,14 @@ class PostgreSQLProductRepository:
         product = await self._session.scalar(query)
         return product_record(product) if product is not None else None
 
+    async def get_many(self, product_ids: list[int]) -> list[ProductRecord]:
+        if not product_ids:
+            return []
+        products = await self._session.scalars(
+            select(Product).where(Product.id.in_(product_ids))
+        )
+        return [product_record(product) for product in products]
+
     async def update(self, product_id: int, changes: dict[str, str | Decimal]) -> ProductRecord:
         product = (await self._session.execute(
             update(Product).where(Product.id == product_id)
