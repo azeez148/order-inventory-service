@@ -5,7 +5,8 @@ The current implementation includes the FastAPI scaffold and a Docker developmen
 environment with PostgreSQL and Meilisearch, plus the initial database schema.
 The app connects through a bounded asynchronous SQLAlchemy pool and supports
 product creation, retrieval, metadata updates, and atomic stock adjustments.
-Order, search, and reporting functionality will follow incrementally.
+Transactional order creation and retrieval are implemented. Search and reporting
+functionality will follow incrementally.
 
 ## Run with Docker Compose
 
@@ -34,7 +35,8 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -
 
 Containers have health checks, and the app starts after PostgreSQL and Meilisearch
 are healthy. The app checks PostgreSQL connectivity at startup and then serves
-health/docs and product/inventory endpoints. Search calls are not implemented yet.
+health/docs, product/inventory endpoints, and transactional order endpoints.
+Search calls are not implemented yet.
 PostgreSQL creates the four application
 tables from `schema.sql` when its data volume is initialized for the first time.
 
@@ -187,6 +189,56 @@ after injected outbox failures. Only its own products and outbox events are
 removed. Browser Swagger rendering is not an automated test; the same documented
 operations are exercised over real HTTP.
 
+## Orders and concurrent inventory
+
+`POST /api/v1/orders` accepts an object containing item lines:
+
+```json
+{"items":[{"product_id":1,"quantity":2},{"product_id":1,"quantity":3}]}
+```
+
+Replace the example ID with a product you created. The service combines duplicate
+product IDs, so this request reserves five units and stores one item line. It
+reserves products in ascending ID order to reduce deadlock risk for overlapping
+multi-product orders. The response is 201 with status `created`, Decimal total,
+timestamp, and stored item quantities/unit prices. Retrieve it through
+`GET /api/v1/orders/{id}`. Later product-price changes leave historical order
+prices and totals unchanged. Clients do not supply order prices or totals.
+
+Each reservation uses the inventory repository's conditional atomic update:
+`UPDATE products SET stock = stock - quantity WHERE stock >= quantity RETURNING ...`.
+PostgreSQL checks and decrements together, including when concurrent transactions
+compete for the same stock. A separate unlocked SELECT/check/UPDATE would allow
+multiple callers to observe the same available units and oversell them. Python
+locks would only coordinate one process; the database operation works across
+workers accessing the same PostgreSQL database. The nonnegative-stock constraint
+adds a final integrity check.
+
+All reservations, order insertion, and item insertion happen in one transaction.
+A missing product returns 404; insufficient stock returns 409. Either failure
+rolls back earlier reservations and leaves no partial order. Invalid input returns
+422, an unknown order returns 404, and pool acquisition timeout returns 503.
+Requests allow 1–100 lines, positive integer IDs/quantities, and combined quantities
+within PostgreSQL's integer range. A total exceeding `NUMERIC(18,2)` is rejected
+with 422 and complete rollback. Monetary values remain exact decimals.
+
+Run the repeatable HTTP/database checks:
+
+```bash
+docker compose exec -T app python < scripts/check_orders.py
+```
+
+Checks include duplicate normalization, rollback for missing/insufficient items,
+price history, input/total bounds, injected order persistence failure, reversed
+multi-product requests, and two concurrent orders against stock one. The observed
+result was exactly one 201, one 409, and final stock zero. This is a correctness
+check, not a capacity benchmark; the full oversell/mixed-workload scripts are
+still future steps. Only script-owned fixture data is removed.
+
+Repeated requests create separate orders; idempotency, cancellation, and stock
+restoration workflows are not implemented. A lost response after commit therefore
+requires careful client handling rather than automatic retry.
+
 ## Run locally
 
 Requires Python 3.12, pip, and a reachable PostgreSQL instance. Run these commands
@@ -243,8 +295,8 @@ docker compose exec -T app python < scripts/check_inventory_repository.py
 Assertions cover reservation results, invalid quantities, missing products,
 transaction ownership, rollback across multiple reservations, and two concurrent
 transactions competing for one stock unit. The script creates and removes only
-its own fixture products. This is database-level validation; HTTP order endpoints
-and the full oversell load test are still pending.
+its own fixture products. This is database-level validation; use the order script
+above for HTTP transaction checks. The full oversell load test is still pending.
 
 See [Implementation Decisions](docs/IMPLEMENTATION_DECISIONS.md) for the
 assessment, rationale, validation evidence, and remaining limitations.

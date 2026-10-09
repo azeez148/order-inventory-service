@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.api.health import router as health_router
 from app.api.errors import register_exception_handlers
 from app.api.products import router as products_router
+from app.api.orders import router as orders_router
 from app.core.config import Settings
 from app.db.session import create_engine
 
@@ -38,4 +39,5 @@ app = FastAPI(
 )
 app.include_router(health_router)
 app.include_router(products_router)
+app.include_router(orders_router)
 register_exception_handlers(app)
