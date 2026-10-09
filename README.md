@@ -7,7 +7,7 @@ The app connects through a bounded asynchronous SQLAlchemy pool and supports
 product creation, retrieval, metadata updates, and atomic stock adjustments.
 Transactional orders and product search with authoritative database hydration
 and automatic outbox synchronization are implemented. Reporting has separate
-connection capacity; its aggregate API will follow incrementally.
+connection capacity and a sales-summary aggregate API.
 
 ## Run with Docker Compose
 
@@ -143,6 +143,59 @@ running app's configured pool.
 See [SQLAlchemy's async lifecycle documentation](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 and [pooling documentation](https://docs.sqlalchemy.org/en/20/core/pooling.html)
 for the underlying connection behavior.
+
+## Representative assessment data
+
+With the stack running and the outbox worker enabled, run:
+
+```bash
+docker compose exec -T app python -m scripts.seed_data
+```
+
+This creates 3,000 products across ten searchable categories, 30,000 historical
+orders, and 90,000 items using PostgreSQL `generate_series`. Each order contains
+three distinct products with quantities from one to three and stored unit prices.
+The transaction deducts historical purchases from starting stock of 100,000 per
+product and writes one durable search event per product. Existing data is retained.
+
+The dataset is marked by the `assessment-seed-v1: ` description prefix and uses
+order timestamps from 1 January 2025. Repeat runs reuse it and verify counts and
+arithmetic rather than appending duplicates. Preserve the marker when using these
+fixtures. Unexpected counts fail explicitly; the script does not reset data.
+The dataset remains in the development database for later load tests.
+
+The script waits up to fifteen minutes for seed outbox events to finish, checks live
+search and reporting, updates table statistics, and prints actual counts and report
+timings. Run it before concurrent load tests. Indexing failures leave pending events
+durable; rerun after restoring the worker/search service. Losing an already indexed
+Meilisearch volume requires rebuilding projections; this script is not reindex tooling.
+Timings describe this local dataset and machine, not production capacity.
+
+## Sales summary
+
+`GET /api/v1/reports/sales-summary` returns `total_orders`, `total_revenue`,
+`items_sold`, `average_order_value`, and `top_products`. It includes all stored
+orders. Money is represented as decimal strings; average order value is rounded
+to two decimal places. Empty data produces zero metrics and an empty product list.
+
+The top ten products are ranked by units sold descending, historical item revenue
+descending, then product ID ascending. Each entry contains product ID, current
+name, units sold, and revenue. Later product price changes do not alter historical
+sales. Revenue represents stored order amounts; payments are outside this service.
+
+One SQL statement uses separate order and item aggregates to avoid multiplying
+order totals when joining several items, and a grouped product aggregate for the
+ranking. It runs exclusively through the reporting session factory below.
+Statement timeout returns HTTP 504; exhausted connection capacity returns HTTP 503.
+There are no date/status filters, pagination, or cached/materialized aggregates.
+
+```bash
+docker compose exec -T app python -m scripts.check_reports
+```
+
+This check uses a disposable schema to verify empty and known multi-item totals,
+rounding, historical prices, ranking, the ten-product limit, actual aggregate
+timeout, reporting pool exhaustion, and recovery. Public data is preserved.
 
 ## Reporting connection isolation
 

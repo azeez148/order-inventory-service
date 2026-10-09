@@ -24,3 +24,8 @@ class OrderNotFound(Exception):
 class OrderTotalExceeded(Exception):
     def __init__(self) -> None:
         super().__init__("Order total exceeds the supported monetary range")
+
+
+class ReportingTimedOut(Exception):
+    def __init__(self) -> None:
+        super().__init__("Reporting query timed out")

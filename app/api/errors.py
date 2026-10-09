@@ -7,7 +7,7 @@ from app.search.provider import SearchProviderError
 
 from app.core.errors import (
     InsufficientStock, OrderNotFound, OrderTotalExceeded,
-    ProductNotFound, StockAdjustmentRejected,
+    ProductNotFound, StockAdjustmentRejected, ReportingTimedOut,
 )
 
 
@@ -35,6 +35,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(SearchProviderError)
     async def search_unavailable(request: Request, error: SearchProviderError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": "Search is temporarily unavailable"})
+
+    @app.exception_handler(ReportingTimedOut)
+    async def reporting_timeout(request: Request, error: ReportingTimedOut) -> JSONResponse:
+        return JSONResponse(status_code=504, content={"detail": str(error)})
 
     @app.exception_handler(PoolTimeout)
     async def pool_timeout(request: Request, error: PoolTimeout) -> JSONResponse:
