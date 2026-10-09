@@ -11,6 +11,7 @@ RUN python -m pip install -r requirements.txt \
     && useradd --create-home --uid 10001 app
 
 COPY --chown=app:app app ./app
+COPY --chown=app:app scripts ./scripts
 USER app
 
 EXPOSE 8000

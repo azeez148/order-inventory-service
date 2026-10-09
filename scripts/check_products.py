@@ -19,6 +19,7 @@ from app.db.session import create_engine
 from app.repositories.postgres_products import PostgreSQLProductRepository
 from app.schemas.products import ProductCreate, ProductPatch
 from app.services.products import ProductService
+from scripts.fixtures import cleanup_products
 
 
 def request(method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
@@ -55,7 +56,7 @@ async def main() -> None:
                 text('SELECT event_type, processed_at FROM search_outbox WHERE product_id=:id'),
                 {'id': product_id},
             )).all()
-            assert all(row.event_type == 'upsert' and row.processed_at is None for row in rows)
+            assert all(row.event_type == 'upsert' for row in rows)
             return len(rows)
 
     try:
@@ -140,10 +141,7 @@ async def main() -> None:
         print('PASS: injected outbox failures roll back product create/update and outbox insertion together.')
     finally:
         try:
-            if ids:
-                async with sessions.begin() as session:
-                    await session.execute(text('DELETE FROM search_outbox WHERE product_id=ANY(:ids)'), {'ids': ids})
-                    await session.execute(text('DELETE FROM products WHERE id=ANY(:ids)'), {'ids': ids})
+            await cleanup_products(sessions, ids)
         finally:
             await engine.dispose()
     print('PASS: product checks complete; script-owned fixtures and events removed.')

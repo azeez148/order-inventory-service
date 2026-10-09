@@ -131,7 +131,7 @@ async def check_lifecycle() -> None:
         clients.append(client)
         return create_search_provider(settings, client)
 
-    with patch.dict('os.environ', {'MEILISEARCH_URL': 'http://127.0.0.1:1'}):
+    with patch.dict('os.environ', {'MEILISEARCH_URL': 'http://127.0.0.1:1', 'OUTBOX_ENABLED': 'false'}):
         with patch('app.main.create_search_provider', factory):
             async with lifespan(app):
                 assert app.state.search_provider is not None

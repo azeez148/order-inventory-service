@@ -1,7 +1,8 @@
 """FastAPI application entry point."""
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 import httpx
 from fastapi import FastAPI
@@ -15,6 +16,7 @@ from app.api.orders import router as orders_router
 from app.core.config import Settings
 from app.db.session import create_engine
 from app.search.factory import create_search_provider
+from app.search.outbox import SearchOutboxWorker
 
 
 @asynccontextmanager
@@ -36,7 +38,21 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         ) as search_client:
             application.state.search_provider = create_search_provider(settings, search_client)
-            yield
+            task = None
+            if settings.outbox_enabled:
+                worker = SearchOutboxWorker(
+                    application.state.session_factory, application.state.search_provider,
+                    settings.outbox_poll_interval,
+                )
+                task = asyncio.create_task(worker.run(), name="search-outbox")
+            application.state.outbox_task = task
+            try:
+                yield
+            finally:
+                if task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
     finally:
         await engine.dispose()
 

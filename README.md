@@ -6,7 +6,8 @@ environment with PostgreSQL and Meilisearch, plus the initial database schema.
 The app connects through a bounded asynchronous SQLAlchemy pool and supports
 product creation, retrieval, metadata updates, and atomic stock adjustments.
 Transactional orders and product search with authoritative database hydration
-are implemented. The outbox consumer and reporting will follow incrementally.
+and automatic outbox synchronization are implemented. Reporting will follow
+incrementally.
 
 ## Run with Docker Compose
 
@@ -37,7 +38,8 @@ Containers have health checks, and the app starts after PostgreSQL and Meilisear
 are healthy. The app checks PostgreSQL connectivity at startup and then serves
 health/docs, product/inventory endpoints, and transactional order endpoints.
 The product search route uses Meilisearch for matching and PostgreSQL for current
-product values. Outbox events are not automatically processed yet.
+product values. A lifespan-managed worker automatically processes pending outbox
+events and retries search failures.
 PostgreSQL creates the four application
 tables from `schema.sql` when its data volume is initialized for the first time.
 
@@ -107,8 +109,13 @@ One engine/session factory is created per app lifespan. Startup executes
 `SELECT 1` and fails if PostgreSQL cannot be reached. Request-scoped sessions use
 an async context manager to return connections and roll back unfinished work.
 Services must explicitly manage write transactions; the dependency does not
-automatically commit. Shutdown disposes the engine. An `AsyncSession` belongs to
+automatically commit. Shutdown cancels/awaits the outbox worker, closes its HTTP
+client, then disposes the engine. An `AsyncSession` belongs to
 one request/task and must not be shared among concurrent tasks.
+
+The active outbox consumer uses one connection from this OLTP pool while awaiting
+indexing. It locks its event, not product rows; warehouse/order writes can continue.
+This is an accepted baseline trade-off to evaluate in the mixed workload tests.
 
 Pools are per process: four workers at these settings could open up to 40 OLTP
 connections, before future reporting capacity or other clients. Reporting will
@@ -171,8 +178,8 @@ Creation and actual name/description changes append an `upsert` outbox event in
 the same transaction as the product write. A failed event insert rolls back the
 product change. Price-only and stock-only changes need no text-search event:
 search returns matching IDs and hydrates current values from
-PostgreSQL. The consumer is not implemented yet, so events remain pending and
-products are not automatically searchable in Meilisearch at this step.
+PostgreSQL. The worker indexes committed product state asynchronously; new
+products and text changes become searchable after their events are processed.
 
 Stock adjustment uses one conditional database update. Arithmetic uses a wider
 intermediate type so both underflow and integer overflow are rejected cleanly.
@@ -265,7 +272,7 @@ the API hydrates current prices and stock from PostgreSQL.
 Indexing/removal waits for the asynchronous task to reach `succeeded`. Failed,
 canceled, malformed, or timed-out operations raise `SearchProviderError` with a
 sanitized message. A timeout does not cancel server-side work: idempotent upserts
-allow the later outbox consumer to retry uncertain completion safely. The client
+allow the outbox consumer to retry uncertain completion safely. The client
 is closed on lifespan exit. Search connection/index setup is lazy, so application
 lifespan itself does not require a search network call; Compose still waits for
 service health during stack startup.
@@ -283,7 +290,7 @@ docker compose exec -T app python < scripts/check_search_provider.py
 
 The script checks failure handling with HTTPX's mock transport, validates behavior
 against a separate randomly named live index, and removes only that index.
-Product outbox events are still pending; no consumer runs yet.
+Product outbox events are consumed automatically by the worker described below.
 See [Meilisearch's task lifecycle reference](https://www.meilisearch.com/docs/reference/api/async-task-management/get-task)
 for why queued writes need completion checks.
 
@@ -315,8 +322,54 @@ This script creates fixture products via HTTP, explicitly indexes them through
 the provider, exercises the real API, and removes only its own data/documents.
 Checks cover ranking, one-query hydration, stale product/text projections,
 current prices/stock, validation, and sanitized provider failure handling.
-Until Step 11's consumer is added, creating a product alone records indexing
-intent but does not make that product automatically searchable.
+Controlled provider snapshots simulate stale matches deterministically while the
+real worker is active; automatic synchronization is tested separately below.
+
+## Transactional search synchronization
+
+Product writes and `upsert` events commit together. A background asyncio task
+polls the durable PostgreSQL outbox during FastAPI lifespan. It claims pending
+events using `FOR UPDATE SKIP LOCKED`, reads current product text, awaits the
+provider's confirmed indexing success, and sets `processed_at` before committing.
+The acknowledgement uses actual clock time rather than transaction-start time.
+
+An advisory transaction lock permits one active consumer per outbox table across
+workers/replicas, preventing overlapping old/new projections. The lock uses a
+reserved negative table-OID key and releases automatically on commit, rollback,
+or connection loss. This intentionally favors simple ordering over parallel
+indexing throughput. Product rows are read without locks during the search call.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OUTBOX_ENABLED` | `true` | Start the lifespan worker; `false` disables it |
+| `OUTBOX_POLL_INTERVAL` | `1` second | Delay after no work or a failed attempt |
+
+If search fails, the transaction rolls back and the event remains pending. The
+worker logs the error class without private payloads, sleeps, and retries.
+Events survive process restarts. If indexing succeeds before acknowledgement
+fails, retry resends current state using an idempotent upsert. This is at-least-once
+delivery, not a distributed transaction or an exactly-once guarantee. A later
+product edit creates another event, ensuring eventual convergence to current
+committed text. Orders and product mutations do not call Meilisearch directly.
+
+Shutdown cancels and awaits the worker before closing the HTTP client/engine.
+Cancellation rolls back active acknowledgement work, leaving durable intent
+retryable. Processed rows are retained for this assessment. An unsupported or
+persistently failing oldest event can block the queue; dead-letter handling,
+backoff, retention, and dedicated workers are future operational improvements.
+Index loss still requires rebuilding already processed projections; recreating
+the empty index alone is insufficient.
+
+```bash
+docker compose exec -T app python -m scripts.check_outbox
+```
+
+The check verifies automatic HTTP create/update synchronization and processed
+timestamps against the running app. A disposable PostgreSQL schema separately
+tests network failure/recovery, competing consumers, nonblocking product writes,
+acknowledgement failure, skipped locks, and normal/exceptional shutdown. Only
+test-owned schema/data/documents are removed. Validation scripts are included in
+the app image, so they can also run as `python -m scripts.<name>`.
 
 ## Run locally
 

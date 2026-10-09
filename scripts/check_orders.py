@@ -21,6 +21,7 @@ from app.repositories.postgres_orders import PostgreSQLOrderRepository
 from app.repositories.orders import NewOrderItem, OrderRecord
 from app.schemas.orders import OrderCreate
 from app.services.orders import OrderService
+from scripts.fixtures import cleanup_products
 
 
 async def http(method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
@@ -149,13 +150,7 @@ async def main() -> None:
         print('PASS: overlapping multi-item orders with reversed input both complete using sorted reservations.')
     finally:
         try:
-            async with sessions.begin() as session:
-                if orders:
-                    await session.execute(text('DELETE FROM order_items WHERE order_id=ANY(:ids)'), {'ids': orders})
-                    await session.execute(text('DELETE FROM orders WHERE id=ANY(:ids)'), {'ids': orders})
-                if products:
-                    await session.execute(text('DELETE FROM search_outbox WHERE product_id=ANY(:ids)'), {'ids': products})
-                    await session.execute(text('DELETE FROM products WHERE id=ANY(:ids)'), {'ids': products})
+            await cleanup_products(sessions, products, orders)
         finally:
             await engine.dispose()
     print('PASS: order validation complete; script-owned fixtures removed.')

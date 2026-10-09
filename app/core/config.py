@@ -21,6 +21,8 @@ class Settings(BaseModel):
     meilisearch_index: str = Field(default="products", pattern=r"^[A-Za-z0-9_-]+$")
     search_http_timeout: float = Field(default=5, gt=0, allow_inf_nan=False)
     search_task_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    outbox_enabled: bool = True
+    outbox_poll_interval: float = Field(default=1, gt=0, allow_inf_nan=False)
 
     @field_validator("database_url")
     @classmethod
@@ -49,5 +51,7 @@ class Settings(BaseModel):
                 "meilisearch_index": os.environ.get("MEILISEARCH_INDEX", "products"),
                 "search_http_timeout": os.environ.get("SEARCH_HTTP_TIMEOUT", "5"),
                 "search_task_timeout": os.environ.get("SEARCH_TASK_TIMEOUT", "30"),
+                "outbox_enabled": os.environ.get("OUTBOX_ENABLED", "true"),
+                "outbox_poll_interval": os.environ.get("OUTBOX_POLL_INTERVAL", "1"),
             }
         )
